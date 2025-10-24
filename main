@@ -1,0 +1,469 @@
+"""
+Script principal para processamento de dados de crédito bancário.
+Processa dados de diferentes fontes e gera dataframes consolidados.
+"""
+
+import pandas as pd
+import os
+import glob
+from datetime import datetime
+import re
+
+# =============================================================================
+# VARIÁVEIS DE CONFIGURAÇÃO
+# =============================================================================
+
+# Caminho base - alterar conforme ambiente (local ou AWS Glue)
+# Local: caminho Windows
+# AWS Glue: caminho S3
+base_path = r"C:\Users\BalerionRider\Documents\repo\base_credito"
+
+# Caminhos dos arquivos de recursos
+mapeamento_path = os.path.join(base_path, "input", "resources", "mapeamento_atributos.csv")
+entradas_manuais_path = os.path.join(base_path, "input", "resources", "entradas_manuais_atributos.csv")
+historico_path = os.path.join(base_path, "input", "resources", "historico_atributos.csv")
+
+# Caminho para séries históricas
+series_historicas_path = os.path.join(base_path, "refined")
+
+# Instituições disponíveis
+instituicoes = ["banco_brasil", "bradesco", "santander"]
+
+# =============================================================================
+# FUNÇÕES DE LEITURA DE DADOS
+# =============================================================================
+
+def ler_mapeamento_atributos():
+    """
+    Lê o arquivo de mapeamento de atributos.
+    Retorna DataFrame com as regras de mapeamento.
+    """
+    print("Lendo arquivo de mapeamento de atributos...")
+    
+    try:
+        df = pd.read_csv(mapeamento_path, sep=';', encoding='utf-8')
+        print(f"Arquivo de mapeamento carregado: {len(df)} registros")
+        return df
+    except Exception as e:
+        print(f"Erro ao ler arquivo de mapeamento: {e}")
+        return pd.DataFrame()
+
+def ler_entradas_manuais():
+    """
+    Lê o arquivo de entradas manuais e faz pivot das datas.
+    Retorna DataFrame com colunas: tipo, nom_inst, nom_ind, nom_grup, nom_atbt, data, valor
+    """
+    print("Lendo arquivo de entradas manuais...")
+    
+    try:
+        df = pd.read_csv(entradas_manuais_path, sep=';', encoding='utf-8')
+        
+        if df.empty:
+            print("Arquivo de entradas manuais está vazio")
+            return pd.DataFrame()
+        
+        # Identificar colunas de data (formato YYYY-MM-DD)
+        data_columns = [col for col in df.columns if re.match(r'\d{4}-\d{2}-\d{2}', col)]
+        
+        if not data_columns:
+            print("Nenhuma coluna de data encontrada no arquivo de entradas manuais")
+            return pd.DataFrame()
+        
+        # Fazer pivot das colunas de data
+        df_pivot = pd.melt(
+            df, 
+            id_vars=['tipo', 'nom_inst', 'nom_ind', 'nom_grup', 'nom_atbt'],
+            value_vars=data_columns,
+            var_name='data',
+            value_name='valor'
+        )
+        
+        # Remover linhas com valores nulos
+        df_pivot = df_pivot.dropna(subset=['valor'])
+        
+        # Converter data para datetime
+        df_pivot['data'] = pd.to_datetime(df_pivot['data'])
+        
+        print(f"Entradas manuais processadas: {len(df_pivot)} registros")
+        return df_pivot
+        
+    except Exception as e:
+        print(f"Erro ao ler arquivo de entradas manuais: {e}")
+        return pd.DataFrame()
+
+def ler_historico_atributos():
+    """
+    Lê o arquivo de histórico de atributos e faz pivot das datas.
+    Retorna DataFrame com colunas: tipo, nom_inst, nom_ind, nom_grup, nom_atbt, data, valor
+    """
+    print("Lendo arquivo de histórico de atributos...")
+    
+    try:
+        df = pd.read_csv(historico_path, sep=';', encoding='utf-8')
+        
+        if df.empty:
+            print("Arquivo de histórico está vazio")
+            return pd.DataFrame()
+        
+        # Identificar colunas de data (formato YYYY-MM-DD)
+        data_columns = [col for col in df.columns if re.match(r'\d{4}-\d{2}-\d{2}', col)]
+        
+        if not data_columns:
+            print("Nenhuma coluna de data encontrada no arquivo de histórico")
+            return pd.DataFrame()
+        
+        # Fazer pivot das colunas de data
+        df_pivot = pd.melt(
+            df, 
+            id_vars=['tipo', 'nom_inst', 'nom_ind', 'nom_grup', 'nom_atbt'],
+            value_vars=data_columns,
+            var_name='data',
+            value_name='valor'
+        )
+        
+        # Remover linhas com valores nulos
+        df_pivot = df_pivot.dropna(subset=['valor'])
+        
+        # Converter data para datetime
+        df_pivot['data'] = pd.to_datetime(df_pivot['data'])
+        
+        print(f"Histórico processado: {len(df_pivot)} registros")
+        return df_pivot
+        
+    except Exception as e:
+        print(f"Erro ao ler arquivo de histórico: {e}")
+        return pd.DataFrame()
+
+def ler_series_historicas():
+    """
+    Lê os arquivos de séries históricas de todos os bancos.
+    Retorna DataFrame consolidado com todas as séries.
+    """
+    print("Lendo arquivos de séries históricas...")
+    
+    dfs_series = []
+    
+    for instituicao in instituicoes:
+        print(f"Processando séries históricas de {instituicao}...")
+        
+        # Buscar o diretório mais recente (data_ext mais recente)
+        instituicao_path = os.path.join(series_historicas_path, instituicao, "series_historicas")
+        
+        if not os.path.exists(instituicao_path):
+            print(f"Diretório não encontrado: {instituicao_path}")
+            continue
+        
+        # Listar diretórios de data_ext
+        data_dirs = [d for d in os.listdir(instituicao_path) if d.startswith('data_ext=')]
+        
+        if not data_dirs:
+            print(f"Nenhum diretório data_ext encontrado em {instituicao_path}")
+            continue
+        
+        # Ordenar por data e pegar o mais recente
+        data_dirs.sort(reverse=True)
+        latest_dir = data_dirs[0]
+        
+        # Caminho para o arquivo CSV
+        csv_path = os.path.join(instituicao_path, latest_dir, f"{instituicao}_series.csv")
+        
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path, encoding='utf-8')
+                
+                # Adicionar coluna com nome da instituição
+                df['instituicao'] = instituicao
+                
+                # Renomear colunas para padronizar
+                df = df.rename(columns={
+                    'nom_atbt': 'nom_atbt',
+                    'data_base': 'data',
+                    'vlr_atbt': 'valor'
+                })
+                
+                # Converter data para datetime
+                df['data'] = pd.to_datetime(df['data'])
+                
+                # Extrair informações do mapeamento para criar nom_ind e nom_grup
+                # Por enquanto, vamos usar valores padrão - isso pode ser refinado
+                df['nom_ind'] = 'Carteira de Crédito'  # Valor padrão
+                df['nom_grup'] = df['nom_atbt']  # Usar o nome do atributo como grupo
+                df['tipo'] = 'input'
+                
+                dfs_series.append(df)
+                print(f"Séries de {instituicao} carregadas: {len(df)} registros")
+                
+            except Exception as e:
+                print(f"Erro ao ler séries de {instituicao}: {e}")
+        else:
+            print(f"Arquivo não encontrado: {csv_path}")
+    
+    if dfs_series:
+        df_consolidado = pd.concat(dfs_series, ignore_index=True)
+        print(f"Total de séries históricas consolidadas: {len(df_consolidado)} registros")
+        return df_consolidado
+    else:
+        print("Nenhuma série histórica foi carregada")
+        return pd.DataFrame()
+
+# =============================================================================
+# FUNÇÕES DE PROCESSAMENTO
+# =============================================================================
+
+def calcular_campos_calculados(df_mapeamento, df_dados):
+    """
+    Calcula campos que possuem fórmulas definidas no mapeamento.
+    """
+    print("Calculando campos calculados...")
+    
+    # Filtrar apenas registros com cálculo definido
+    campos_calculados = df_mapeamento[df_mapeamento['calculo'].notna() & (df_mapeamento['calculo'] != '')]
+    
+    if campos_calculados.empty:
+        print("Nenhum campo calculado encontrado")
+        return df_dados
+    
+    df_calculados = []
+    
+    for _, campo in campos_calculados.iterrows():
+        print(f"Calculando campo: {campo['nom_grup']} - {campo['nom_atbt']}")
+        
+        # Obter a fórmula
+        formula = campo['calculo']
+        
+        # Extrair referências [grupo|atributo] da fórmula
+        referencias = re.findall(r'\[([^|]+)\|([^\]]+)\]', formula)
+        
+        # Criar DataFrame temporário para este campo
+        df_temp = df_dados.copy()
+        df_temp['nom_ind'] = campo['nom_ind']
+        df_temp['nom_grup'] = campo['nom_grup']
+        df_temp['nom_atbt'] = campo['nom_atbt']
+        df_temp['tipo'] = 'calculado'
+        
+        # Para cada data, calcular o valor
+        valores_calculados = []
+        
+        for data in df_dados['data'].unique():
+            # Filtrar dados para esta data
+            df_data = df_dados[df_dados['data'] == data]
+            
+            # Substituir referências na fórmula pelos valores
+            formula_temp = formula
+            
+            for grupo, atributo in referencias:
+                # Buscar valor para este grupo e atributo nesta data
+                valor_ref = df_data[
+                    (df_data['nom_grup'] == grupo) & 
+                    (df_data['nom_atbt'] == atributo)
+                ]['valor']
+                
+                if not valor_ref.empty:
+                    valor = valor_ref.iloc[0]
+                    formula_temp = formula_temp.replace(f'[{grupo}|{atributo}]', str(valor))
+                else:
+                    # Se não encontrar o valor, usar 0
+                    formula_temp = formula_temp.replace(f'[{grupo}|{atributo}]', '0')
+            
+            # Avaliar a fórmula (cuidado com segurança - em produção usar parser mais seguro)
+            try:
+                valor_calculado = eval(formula_temp)
+                valores_calculados.append({
+                    'data': data,
+                    'valor': valor_calculado
+                })
+            except Exception as e:
+                print(f"Erro ao calcular fórmula para {campo['nom_grup']} - {campo['nom_atbt']} em {data}: {e}")
+                valores_calculados.append({
+                    'data': data,
+                    'valor': 0
+                })
+        
+        # Adicionar valores calculados ao DataFrame
+        for item in valores_calculados:
+            df_temp.loc[df_temp['data'] == item['data'], 'valor'] = item['valor']
+        
+        df_calculados.append(df_temp)
+    
+    if df_calculados:
+        df_calculados_consolidado = pd.concat(df_calculados, ignore_index=True)
+        print(f"Campos calculados processados: {len(df_calculados_consolidado)} registros")
+        return df_calculados_consolidado
+    else:
+        return pd.DataFrame()
+
+def aplicar_prioridade_valores(df_entradas_manuais, df_series_historicas, df_calculados, df_historico):
+    """
+    Aplica a prioridade de valores: entradas_manuais → series_historicas → campos_calculados → historico_atributos
+    """
+    print("Aplicando prioridade de valores...")
+    
+    # Lista de DataFrames em ordem de prioridade
+    dfs_prioridade = [
+        df_entradas_manuais,
+        df_series_historicas,
+        df_calculados,
+        df_historico
+    ]
+    
+    # Nomes das fontes para debug
+    nomes_fontes = ['entradas_manuais', 'series_historicas', 'campos_calculados', 'historico']
+    
+    df_final = pd.DataFrame()
+    
+    for i, df in enumerate(dfs_prioridade):
+        if df.empty:
+            continue
+            
+        print(f"Processando fonte: {nomes_fontes[i]} - {len(df)} registros")
+        
+        # Adicionar coluna de fonte
+        df_temp = df.copy()
+        df_temp['fonte'] = nomes_fontes[i]
+        
+        # Se é o primeiro DataFrame, usar como base
+        if df_final.empty:
+            df_final = df_temp
+        else:
+            # Para cada combinação de chaves, manter apenas o valor da fonte com maior prioridade
+            chaves = ['nom_inst', 'nom_ind', 'nom_grup', 'nom_atbt', 'data']
+            
+            # Merge mantendo apenas registros que não existem no DataFrame final
+            df_temp = df_temp.merge(
+                df_final[chaves], 
+                on=chaves, 
+                how='left', 
+                indicator=True
+            )
+            
+            # Manter apenas registros que não existem no DataFrame final
+            df_temp = df_temp[df_temp['_merge'] == 'left_only'].drop('_merge', axis=1)
+            
+            # Concatenar com o DataFrame final
+            df_final = pd.concat([df_final, df_temp], ignore_index=True)
+    
+    print(f"DataFrame final consolidado: {len(df_final)} registros")
+    return df_final
+
+def criar_dataframes_finais(df_consolidado):
+    """
+    Cria os dataframes finais df_folh_ajus e df_folh_input.
+    """
+    print("Criando dataframes finais...")
+    
+    # Estrutura final: nom_inst, nom_ind, nom_grup, nom_atbt, valor, dat_base_info, dat_extr_info
+    df_final = df_consolidado.copy()
+    
+    # Renomear e reorganizar colunas
+    df_final = df_final.rename(columns={
+        'data': 'dat_base_info',
+        'valor': 'valor'
+    })
+    
+    # Adicionar data de extração (data atual)
+    df_final['dat_extr_info'] = datetime.now().strftime('%Y-%m-%d')
+    
+    # Selecionar colunas finais
+    colunas_finais = ['nom_inst', 'nom_ind', 'nom_grup', 'nom_atbt', 'valor', 'dat_base_info', 'dat_extr_info']
+    df_final = df_final[colunas_finais]
+    
+    # Criar df_folh_ajus (todos os registros)
+    df_folh_ajus = df_final.copy()
+    
+    # Criar df_folh_input (apenas registros de input)
+    df_folh_input = df_final[df_final['nom_inst'].isin(instituicoes)].copy()
+    
+    print(f"df_folh_ajus criado: {len(df_folh_ajus)} registros")
+    print(f"df_folh_input criado: {len(df_folh_input)} registros")
+    
+    return df_folh_ajus, df_folh_input
+
+def salvar_dataframes(df_folh_ajus, df_folh_input):
+    """
+    Salva os dataframes finais em arquivos CSV.
+    """
+    print("Salvando dataframes finais...")
+    
+    # Criar diretórios de saída
+    output_ajus_path = os.path.join(base_path, "refined", "folh_ajus")
+    output_input_path = os.path.join(base_path, "refined", "folh_input")
+    
+    os.makedirs(output_ajus_path, exist_ok=True)
+    os.makedirs(output_input_path, exist_ok=True)
+    
+    # Nome do arquivo com timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Salvar df_folh_ajus
+    arquivo_ajus = os.path.join(output_ajus_path, f"folh_ajus_{timestamp}.csv")
+    df_folh_ajus.to_csv(arquivo_ajus, index=False, encoding='utf-8')
+    print(f"df_folh_ajus salvo em: {arquivo_ajus}")
+    
+    # Salvar df_folh_input
+    arquivo_input = os.path.join(output_input_path, f"folh_input_{timestamp}.csv")
+    df_folh_input.to_csv(arquivo_input, index=False, encoding='utf-8')
+    print(f"df_folh_input salvo em: {arquivo_input}")
+
+# =============================================================================
+# FUNÇÃO PRINCIPAL
+# =============================================================================
+
+def processar_dados_credito():
+    """
+    Função principal que orquestra todo o processo de processamento de dados.
+    """
+    print("=" * 60)
+    print("INICIANDO PROCESSAMENTO DE DADOS DE CRÉDITO")
+    print("=" * 60)
+    
+    try:
+        # 1. Ler arquivo de mapeamento
+        df_mapeamento = ler_mapeamento_atributos()
+        if df_mapeamento.empty:
+            print("Erro: Não foi possível carregar o arquivo de mapeamento")
+            return
+        
+        # 2. Ler entradas manuais
+        df_entradas_manuais = ler_entradas_manuais()
+        
+        # 3. Ler histórico de atributos
+        df_historico = ler_historico_atributos()
+        
+        # 4. Ler séries históricas
+        df_series_historicas = ler_series_historicas()
+        
+        # 5. Calcular campos calculados
+        df_calculados = calcular_campos_calculados(df_mapeamento, df_series_historicas)
+        
+        # 6. Aplicar prioridade de valores
+        df_consolidado = aplicar_prioridade_valores(
+            df_entradas_manuais, 
+            df_series_historicas, 
+            df_calculados, 
+            df_historico
+        )
+        
+        if df_consolidado.empty:
+            print("Erro: Nenhum dado foi consolidado")
+            return
+        
+        # 7. Criar dataframes finais
+        df_folh_ajus, df_folh_input = criar_dataframes_finais(df_consolidado)
+        
+        # 8. Salvar dataframes
+        salvar_dataframes(df_folh_ajus, df_folh_input)
+        
+        print("=" * 60)
+        print("PROCESSAMENTO CONCLUÍDO COM SUCESSO!")
+        print("=" * 60)
+        
+    except Exception as e:
+        print(f"Erro durante o processamento: {e}")
+        raise
+
+# =============================================================================
+# EXECUÇÃO
+# =============================================================================
+
+if __name__ == "__main__":
+    processar_dados_credito()
