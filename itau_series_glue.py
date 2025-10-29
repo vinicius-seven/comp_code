@@ -1,20 +1,17 @@
 """
 Script de consolidação de séries históricas para o banco Itaú (execução em AWS Glue).
 
-Este script foi adaptado para rodar em um ambiente AWS Glue com
-interações em S3 via boto3. Em vez de acessar um sistema de arquivos
-local, os arquivos Excel (.xlsx) são lidos diretamente do bucket e
-prefixo especificados em ``base_path`` (no formato ``s3://bucket/prefix``).
-
-Após o processamento, o arquivo consolidado é gravado de volta no
-mesmo bucket/prefixo, em ``refined/itau/series_historicas/data_ext=YYYY-MM-DD/itau_series.csv``.
+Este script utiliza boto3 para interagir com arquivos Excel (.xlsx) armazenados
+no S3 e pandas para transformar os dados. Depois de processar as abas
+especificadas, grava um único CSV consolidado de volta no S3 usando
+``put_object`` (não utiliza Spark).
 
 Regras gerais:
 
 - Apenas as abas listadas em ``sheet_targets`` são processadas.
-- A coluna ``data_base`` é normalizada para o formato ``YYYY-MM-01``,
-  enquanto ``data_base_original`` preserva o rótulo conforme no Excel.
-- ``data_divulgacao`` é extraído do nome do arquivo (padrão ``1T25`` etc.).
+- ``data_base`` é normalizada para o formato ``YYYY-MM-01`` e
+  ``data_base_original`` preserva o rótulo conforme no Excel.
+- ``data_divulgacao`` é extraída do nome do arquivo (padrão ``1T25`` etc.).
 - A numeração (#1, #2, …) é usada apenas quando o mesmo atributo
   aparece em linhas diferentes da mesma aba.
 - A coluna duplicada de ``data_divulgacao`` foi removida; em vez
@@ -32,8 +29,6 @@ from io import BytesIO
 
 import boto3  # type: ignore
 import pandas as pd  # type: ignore
-import pyspark.pandas as ps  # type: ignore
-from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
 # Configuração de caminho base para S3. Ajuste para o bucket/prefixo em
@@ -311,8 +306,9 @@ def main():
     if not all_records:
         print("Nenhum dado extraído. Verifique se os arquivos e abas estão corretos.")
         return
+    # Constrói DataFrame pandas
     df_final = pd.DataFrame(all_records)
-    # organiza colunas na ordem desejada
+    # Ordena colunas
     ordered_cols = [
         "pagina",
         "nom_inst",
@@ -325,18 +321,13 @@ def main():
     ]
     df_final = df_final[ordered_cols]
     df_final.sort_values(by="data_divulgacao", inplace=True)
-
-    # Converte para pandas-on-Spark e para Spark DataFrame
-    psdf = ps.from_pandas(df_final)
-    spark_df = psdf.to_spark()
-    # Inicializa SparkSession, se necessário
-    spark = SparkSession.builder.getOrCreate()
-    # Define caminho de saída sem extensão (.csv) para que o Spark grave o diretório
-    output_prefix = f"{prefix_base}/refined/itau/series_historicas/data_ext={execution_date}/itau_series"
-    output_path = f"s3://{bucket}/{output_prefix}"
-    # Grava usando write.format
-    spark_df.write.format("csv").option("header", "true").mode("overwrite").save(output_path)
-    print(f"Arquivo gerado com sucesso: {output_path}")
+    # Gera CSV em memória
+    csv_buffer = df_final.to_csv(index=False, encoding="utf-8")
+    # Define chave de saída com extensão .csv
+    output_key = f"{prefix_base}/refined/itau/series_historicas/data_ext={execution_date}/itau_series.csv"
+    # Envia o arquivo ao S3
+    s3_client.put_object(Bucket=bucket, Key=output_key, Body=csv_buffer.encode("utf-8"))
+    print(f"Arquivo gerado com sucesso: s3://{bucket}/{output_key}")
 
 
 if __name__ == "__main__":
