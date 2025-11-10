@@ -1,0 +1,149 @@
+Documentação do Projeto Base Crédito
+Visão Geral
+
+O Base Crédito é um pipeline de ETL desenvolvido em Python que consolida e padroniza indicadores de crédito de várias instituições financeiras. O projeto lê planilhas e arquivos CSV, aplica mapeamentos de atributos, calcula indicadores derivados e salva os resultados em um repositório unificado. Tudo é organizado para rodar em ambientes locais (para desenvolvimento) e em produção através de AWS Glue, com orquestração por meio de AWS Step Functions.
+
+Objetivo
+
+O objetivo principal é manter um repositório único com valores confiáveis de indicadores de crédito (carteira de crédito, atrasos, cobertura, etc.) provenientes de:
+
+Séries históricas dos bancos (Bradesco, Santander, Banco do Brasil, Itaú);
+
+Entradas manuais de atributos (correções feitas por analistas);
+
+Histórico de atributos (valores antigos que devem permanecer disponíveis);
+
+Cálculos derivados (campos compostos a partir de outros indicadores);
+
+Futuras fontes como tabelas do IFData (via Athena) e MD&A.
+
+No final do processo, são gerados dois conjuntos de dados — folh_ajus e folh_inpu — correspondentes aos tipos de atribuição de valores (ajustado ou input original), contendo os indicadores unificados e prontos para análise.
+
+Estrutura de Pastas e Arquivos
+
+O projeto utiliza um diretório base (base_path) configurável tanto para ambiente local quanto S3. A estrutura de pastas é a mesma nos dois ambientes, variando apenas o prefixo file:// ou s3://.
+
+input/
+
+<banco>/series_historicas/: planilhas Excel com séries históricas de cada banco, separadas por trimestre (e.g. Bradesco 2T25 - Séries Históricas.xlsx).
+
+resources/mapeamento_atributos.csv: mapeia cada atributo (indicador) à sua origem, planilha, coluna e fórmula de cálculo (quando aplicável).
+
+resources/entradas_manuais_atributos.csv: entradas manuais fornecidas pelos analistas, onde cada data é uma coluna a ser despivotada.
+
+resources/historico_atributos.csv: histórico de valores antigos, também com datas em colunas.
+
+refined/
+
+<banco>/series_historicas/: contém os arquivos CSV de séries históricas consolidadas por banco e data de extração, gerados pelos jobs de extração.
+
+folh_ajus/ e folh_inpu/: destinos finais para os CSVs consolidados do tipo ajustado e input, com subdiretórios por data de execução (data_ext=YYYY-MM-DD).
+
+Scripts de Extração de Séries Históricas
+
+Para cada banco existe um script dedicado que lê suas planilhas Excel, extrai as abas de interesse e salva um CSV no S3 (ou em disco local). Os scripts locais e suas contrapartes para Glue são semelhantes, variando apenas a forma de acesso aos arquivos e a escrita no destino.
+
+Funcionamento Geral
+
+Definição de base_path no início do script, indicando onde estão as pastas input/ e onde serão gravados os resultados em refined/.
+
+Listagem de arquivos .xlsx em input/<banco>/series_historicas/.
+
+Leitura de abas específicas para cada banco:
+
+Bradesco: '13- Carteira Expandida ', '12- Carteira Segreg Modalidade ', 'Carteira Crédito - Indicadores', 'Carteira Expandida - Reclas.'
+
+Santander: 'Balanço', 'DMPL'
+
+Banco do Brasil: 'Índices de Atraso', 'Cobertura de Crédito', 'Carteira de Crédito'
+
+Itaú: 'NPL_com_TVM', 'IFRS(17) - Balanço - Ativo', 'IFRS(17)-Balanço-Passivo e PL ', 'Sumário_PRO FORMA'
+
+Identificação da linha de cabeçalho (linha que contém as datas) através de uma heurística que verifica a presença de dois ou mais rótulos de datas.
+
+Conversão para formato longo: cada linha de atributo é convertida em várias linhas (atributo x data), preservando o rótulo original da data (data_base_original) e normalizando para o último mês do trimestre (data_base). A coluna nom_atbt recebe sufixo #1, #2, etc., somente quando atributos com o mesmo nome aparecem em linhas diferentes.
+
+Extração da data de divulgação a partir do nome do arquivo (1T25 → 2025-03-01, 2T25 → 2025-06-01 etc.).
+
+Geração de CSV consolidado para o banco em refined/<banco>/series_historicas/data_ext=YYYY-MM-DD/<banco>_series.csv. No ambiente Glue, o CSV é escrito diretamente em S3 usando boto3; localmente, usa-se o sistema de arquivos.
+
+Os scripts foram implementados tanto em modo local (*_series_local.py) quanto em modo Glue (*_series_glue.py). Nos scripts Glue não há dependências de Spark: a leitura e escrita são feitas com pandas e boto3.
+
+Script de Consolidação de Atributos
+processar_atributos_glue.py
+
+Este script orquestra a leitura de todas as origens, aplica o mapeamento, realiza cálculos e consolida os dados. É executado no AWS Glue utilizando Python e boto3 (sem Spark) e gera os arquivos finais folh_ajus e folh_inpu.
+
+Etapas Principais
+
+Carga do mapeamento de atributos (mapeamento_atributos.csv): define, para cada indicador, o tipo (input ou ajust), a instituição (nom_inst), o indicador principal (nom_ind), o grupo (nom_grup), o nome do atributo (nom_atbt), a origem dos dados (origem), a planilha e a coluna (para séries históricas) e, opcionalmente, uma fórmula de cálculo.
+
+Carga e transformação das entradas manuais (entradas_manuais_atributos.csv):
+
+As datas são colunas; o script despivota o arquivo para um formato longo com colunas dat_base_info, valor e dat_extr_info (data de execução).
+
+Carga e transformação do histórico de atributos (historico_atributos.csv):
+
+Semelhante às entradas manuais, mas dat_extr_info recebe a própria dat_base_info como valor.
+
+Leitura das séries históricas dos bancos: lê todos os CSVs em refined/<banco>/series_historicas/, concatena e mantém apenas a última divulgação (data_divulgacao) para cada combinação de planilha (pagina), instituição (nom_inst), atributo (nom_atbt) e data base (data_base).
+
+Processamento por origem:
+
+Series temporais: junta-se o mapeamento aos valores de séries históricas por nom_inst, nom_planilha e nom_coluna. Gera-se um DataFrame com as colunas finais e prioridade 2.
+
+Entradas manuais: junta-se diretamente pelas chaves (tipo, nom_inst, nom_ind, nom_grup, nom_atbt, dat_base_info). Prioridade 1 (maior).
+
+Histórico: junta-se de forma semelhante às entradas manuais. Prioridade 3 (menor).
+
+Campos calculados: identifica linhas do mapeamento com origem configurada como calculado e avalia fórmulas matemáticas. As fórmulas podem referenciar outros atributos através de tokens do tipo [tipo|nom_grup|nom_atbt]. O script substitui cada token pelo valor do atributo correspondente para aquela data e avalia a expressão. Campos calculados recebem prioridade 2.
+
+Origens futuras (IFData e MD&A): presentes como placeholders e retornam dataframes vazios até que as integrações sejam definidas.
+
+Unificação e Prioridade: concatena todos os dataframes das origens e remove duplicidades de acordo com a ordem de prioridade — entradas manuais (1), séries/históricos/calculados (2), histórico (3). Para cada combinação de tipo, nom_inst, nom_ind, nom_grup, nom_atbt e dat_base_info, mantém-se apenas o registro de maior prioridade.
+
+Separação por tipo: divide o DataFrame final em dois — ajust (df_folh_ajus) e input (df_folh_inpu) — com colunas nom_inst, nom_ind, nom_grup, nom_atbt, valor, dat_base_info, dat_extr_info.
+
+Gravação dos resultados: cada DataFrame é salvo em S3 em uma pasta datada:
+
+refined/folh_ajus/data_ext=YYYY-MM-DD/folh_ajus.csv
+refined/folh_inpu/data_ext=YYYY-MM-DD/folh_inpu.csv
+
+
+Se o script for executado novamente no mesmo dia, o arquivo é sobrescrito, mantendo apenas a versão mais recente.
+
+Orquestração com AWS Step Functions
+
+Para garantir a execução correta dos jobs Glue na ordem apropriada, o projeto utiliza um fluxo de AWS Step Functions. O diagrama simplificado é o seguinte:
+
+Extração de Séries Históricas (Parallel State)
+
+Executa em paralelo os quatro jobs Glue correspondentes a cada banco: bradesco_series_glue.py, santander_series_glue.py, banco_brasil_series_glue.py e itau_series_glue.py.
+
+Cada job lê os arquivos Excel do banco respectivo, processa as abas de interesse e grava o CSV consolidado em refined/<banco>/series_historicas/data_ext=YYYY-MM-DD/<banco>_series.csv.
+
+Processamento de Atributos (Task State)
+
+Após a conclusão de todos os jobs de extração, a Step Function aciona o job Glue que executa processar_atributos_glue.py.
+
+Este job lê o mapeamento, as entradas manuais, o histórico e as séries históricas recém-criadas, aplica o mapeamento e os cálculos, unifica e salva os resultados nos diretórios folh_ajus e folh_inpu com a data de extração.
+
+(Opcional) Jobs futuros de IFData e MD&A
+
+Estados adicionais podem ser incluídos no Step Function para extrair dados do IFData via Athena ou ler a base MD&A quando essas integrações forem definidas. Esses jobs deveriam gerar DataFrames adicionais e seriam integrados no job principal de processamento de atributos.
+
+Considerações de Uso
+
+Configuração do caminho base (base_path): para executar localmente, aponte base_path para um diretório local (por exemplo, C:\Users\usuario\projeto). No Glue, defina base_path com o caminho S3 do bucket (por exemplo, s3://meu-bucket/projeto).
+
+Formato das datas: todas as datas nos resultados são normalizadas para o primeiro dia do último mês de cada trimestre (ex.: 2T25 → 2025-06-01). O rótulo original da data nas séries históricas é preservado internamente para rastreabilidade.
+
+Prioridade dos valores: se existir valor manual para uma data, ele prevalece sobre os das séries ou cálculos. Caso contrário, utiliza-se o valor proveniente das origens indicadas no mapeamento; se ainda assim não houver valor, recorre-se ao histórico.
+
+Manutenção das abas: os scripts de séries foram escritos de forma robusta para tolerar variações de acentuação e espaçamento nos nomes das abas. Para incluir novas abas, basta adicionar o nome na lista sheet_targets correspondente.
+
+Adição de novas origens: o mapeamento suporta facilmente origens futuras. Basta implementar funções adicionais seguindo o padrão (ler dados, unir pelo mapeamento e atribuir uma prioridade).
+
+Conclusão
+
+O projeto Base Crédito oferece uma solução flexível e extensível para integrar dados de crédito de múltiplas fontes, preservando histórico e permitindo ajustes manuais. A arquitetura modular — com scripts independentes de extração, um mapeamento centralizado e orquestração via Step Functions — facilita a manutenção e a expansão para novas origens ou indicadores no futuro.
